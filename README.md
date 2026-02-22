@@ -9,13 +9,13 @@ Built for developers running **Android, iOS, AI agents, and CLI tools** on Apple
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/knowamit/macoptimize/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Ammroid/macoptimize/main/install.sh | bash
 ```
 
 Or manually:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/knowamit/macoptimize/main/macoptimize -o ~/bin/macoptimize
+curl -fsSL https://raw.githubusercontent.com/Ammroid/macoptimize/main/macoptimize -o ~/bin/macoptimize
 chmod +x ~/bin/macoptimize
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```

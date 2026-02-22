@@ -3,7 +3,7 @@ set -e
 
 INSTALL_DIR="$HOME/bin"
 SCRIPT_NAME="macoptimize"
-REPO_URL="https://raw.githubusercontent.com/knowamit/macoptimize/main/macoptimize"
+REPO_URL="https://raw.githubusercontent.com/Ammroid/macoptimize/main/macoptimize"
 
 echo "Installing macoptimize..."
 
