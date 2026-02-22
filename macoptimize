@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# macoptimize - MacBook Pro M1 Performance Optimizer & Monitor
+# macoptimize - macOS Apple Silicon Performance Optimizer & Monitor
 # Built for developers (Android/iOS/CLI/AI agents workflow)
 #
 
@@ -612,7 +612,7 @@ cmd_help() {
     echo -e "${BOLD}${CYAN}"
     echo "  ┌─────────────────────────────────────────────────┐"
     echo "  │        macoptimize v${VERSION}                       │"
-    echo "  │    MacBook Pro M1 Performance Optimizer          │"
+    echo "  │  macOS Apple Silicon Performance Optimizer       │"
     echo "  └─────────────────────────────────────────────────┘"
     echo -e "${NC}"
     echo -e "  ${BOLD}Usage:${NC} macoptimize <command>"
