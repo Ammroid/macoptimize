@@ -1,0 +1,665 @@
+#!/bin/bash
+#
+# macoptimize - MacBook Pro M1 Performance Optimizer & Monitor
+# Built for developers (Android/iOS/CLI/AI agents workflow)
+#
+
+set -uo pipefail
+
+VERSION="1.0.0"
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+print_header() {
+    echo ""
+    echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}${CYAN}  $1${NC}"
+    echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+print_section() {
+    echo ""
+    echo -e "${BOLD}${BLUE}▸ $1${NC}"
+    echo -e "${BLUE}  ─────────────────────────────────${NC}"
+}
+
+ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
+warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
+bad()  { echo -e "  ${RED}✗${NC} $1"; }
+info() { echo -e "  ${CYAN}ℹ${NC} $1"; }
+
+bytes_to_human() {
+    local bytes=$1
+    if (( bytes >= 1073741824 )); then
+        echo "$(echo "scale=1; $bytes/1073741824" | bc)G"
+    elif (( bytes >= 1048576 )); then
+        echo "$(echo "scale=1; $bytes/1048576" | bc)M"
+    else
+        echo "${bytes}B"
+    fi
+}
+
+# ─── Commands ─────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    print_header "System Health Report"
+
+    # CPU & Memory overview
+    print_section "CPU & Memory"
+    local cpu_usage
+    cpu_usage=$(ps -A -o %cpu | awk '{s+=$1} END {printf "%.1f", s}')
+    local cpu_count
+    cpu_count=$(sysctl -n hw.ncpu)
+    local cpu_pct
+    cpu_pct=$(echo "scale=1; $cpu_usage / $cpu_count" | bc)
+
+    if (( $(echo "$cpu_pct > 80" | bc -l) )); then
+        bad "CPU: ${cpu_pct}% average per core (HIGH)"
+    elif (( $(echo "$cpu_pct > 50" | bc -l) )); then
+        warn "CPU: ${cpu_pct}% average per core (MODERATE)"
+    else
+        ok "CPU: ${cpu_pct}% average per core"
+    fi
+
+    local mem_pressure
+    mem_pressure=$(memory_pressure 2>/dev/null | grep "System-wide memory free percentage" | awk '{print $NF}' || echo "unknown")
+    if [[ "$mem_pressure" != "unknown" ]]; then
+        local free_pct=${mem_pressure//%/}
+        if (( free_pct < 15 )); then
+            bad "Memory free: ${mem_pressure} (CRITICAL)"
+        elif (( free_pct < 30 )); then
+            warn "Memory free: ${mem_pressure} (LOW)"
+        else
+            ok "Memory free: ${mem_pressure}"
+        fi
+    fi
+
+    local swap_used
+    swap_used=$(sysctl -n vm.swapusage 2>/dev/null | awk -F'used = ' '{print $2}' | awk '{print $1}')
+    if [[ -n "$swap_used" ]]; then
+        local swap_val=${swap_used%%M*}
+        swap_val=${swap_val%%G*}
+        if [[ "$swap_used" == *"G"* ]] || (( $(echo "${swap_val:-0} > 500" | bc -l 2>/dev/null || echo 0) )); then
+            bad "Swap used: ${swap_used} (HIGH - causing SSD wear & slowness)"
+        elif (( $(echo "${swap_val:-0} > 100" | bc -l 2>/dev/null || echo 0) )); then
+            warn "Swap used: ${swap_used}"
+        else
+            ok "Swap used: ${swap_used}"
+        fi
+    fi
+
+    # Disk
+    print_section "Disk"
+    local disk_pct
+    disk_pct=$(df -h / | tail -1 | awk '{print $5}' | tr -d '%')
+    local disk_avail
+    disk_avail=$(df -h / | tail -1 | awk '{print $4}')
+    if (( disk_pct > 90 )); then
+        bad "Disk usage: ${disk_pct}% (${disk_avail} free) - CRITICAL"
+    elif (( disk_pct > 75 )); then
+        warn "Disk usage: ${disk_pct}% (${disk_avail} free)"
+    else
+        ok "Disk usage: ${disk_pct}% (${disk_avail} free)"
+    fi
+
+    # Thermal
+    print_section "Thermal & Power"
+    local thermal
+    thermal=$(pmset -g therm 2>/dev/null | grep "CPU_Speed_Limit" | awk '{print $NF}')
+    if [[ -n "$thermal" ]] && (( thermal < 100 )); then
+        bad "CPU throttled to ${thermal}% (thermal pressure)"
+    else
+        ok "No thermal throttling detected"
+    fi
+
+    local power_source
+    power_source=$(pmset -g ps | head -1 | grep -oE "'.*'" | tr -d "'")
+    info "Power: ${power_source:-Unknown}"
+
+    # Top resource hogs
+    print_section "Top CPU Consumers (>5%)"
+    ps -eo pid,%cpu,%mem,comm | sort -k2 -rn | awk '$2>5.0 {printf "  %-6s %-5s %-5s %s\n", $1, $2"%", $3"%", $4}' | head -10
+    local high_cpu_count
+    high_cpu_count=$(ps -eo %cpu | awk '$1>5.0' | wc -l | tr -d ' ')
+    if (( high_cpu_count == 0 )); then
+        ok "No processes using >5% CPU"
+    fi
+
+    print_section "Top Memory Consumers (>2%)"
+    ps -eo pid,%cpu,%mem,comm | sort -k3 -rn | awk '$3>2.0 {printf "  %-6s %-5s %-5s %s\n", $1, $2"%", $3"%", $4}' | head -10
+
+    echo ""
+}
+
+cmd_hogs() {
+    print_header "Resource Hog Detector"
+
+    print_section "Abnormal CPU Usage (>20% sustained)"
+    local found=0
+    while IFS= read -r line; do
+        local pid cpu mem comm
+        pid=$(echo "$line" | awk '{print $1}')
+        cpu=$(echo "$line" | awk '{print $2}')
+        mem=$(echo "$line" | awk '{print $3}')
+        comm=$(echo "$line" | awk '{print $4}')
+        bad "PID ${pid}: ${comm} - CPU: ${cpu}% MEM: ${mem}%"
+        found=1
+    done < <(ps -eo pid,%cpu,%mem,comm | sort -k2 -rn | awk '$2>20.0 {print $1, $2, $3, $4}')
+    if (( found == 0 )); then
+        ok "No processes with abnormally high CPU"
+    fi
+
+    print_section "Memory Hogs (>5% of RAM)"
+    found=0
+    while IFS= read -r line; do
+        local pid cpu mem comm
+        pid=$(echo "$line" | awk '{print $1}')
+        cpu=$(echo "$line" | awk '{print $2}')
+        mem=$(echo "$line" | awk '{print $3}')
+        comm=$(echo "$line" | awk '{print $4}')
+        warn "PID ${pid}: ${comm} - MEM: ${mem}% CPU: ${cpu}%"
+        found=1
+    done < <(ps -eo pid,%cpu,%mem,comm | sort -k3 -rn | awk '$3>5.0 {print $1, $2, $3, $4}')
+    if (( found == 0 )); then
+        ok "No processes with abnormally high memory"
+    fi
+
+    print_section "Zombie / Stuck Processes"
+    local zombies
+    zombies=$(ps aux | awk '$8 ~ /Z/ {print $2, $11}')
+    if [[ -n "$zombies" ]]; then
+        bad "Zombie processes found:"
+        echo "$zombies" | while read -r z; do echo "    $z"; done
+    else
+        ok "No zombie processes"
+    fi
+
+    print_section "Dev-Specific: Known Heavy Processes"
+    local dev_procs=("gradle" "java" "kotlin" "node" "webpack" "esbuild" "qemu" "emulator" "Android" "Xcode" "Simulator" "flutter" "dart" "docker" "ollama" "python3")
+    for proc in "${dev_procs[@]}"; do
+        local pinfo
+        pinfo=$(ps aux | grep -i "$proc" | grep -v grep | awk '{cpu+=$3; mem+=$4; n++} END {if(n>0) printf "%d instances, CPU: %.1f%%, MEM: %.1f%%", n, cpu, mem}')
+        if [[ -n "$pinfo" ]]; then
+            info "${proc}: ${pinfo}"
+        fi
+    done
+
+    echo ""
+}
+
+cmd_clean() {
+    print_header "System Cleanup"
+
+    local total_freed=0
+
+    print_section "Xcode Derived Data"
+    if [[ -d ~/Library/Developer/Xcode/DerivedData ]]; then
+        local dd_size
+        dd_size=$(du -sk ~/Library/Developer/Xcode/DerivedData 2>/dev/null | awk '{print $1}')
+        if (( dd_size > 1048576 )); then  # >1GB
+            warn "Xcode DerivedData: $(bytes_to_human $((dd_size * 1024)))"
+            read -rp "  Delete? [y/N] " ans
+            if [[ "$ans" =~ ^[Yy] ]]; then
+                rm -rf ~/Library/Developer/Xcode/DerivedData/*
+                ok "Cleared DerivedData"
+                total_freed=$((total_freed + dd_size))
+            fi
+        else
+            ok "DerivedData is small ($(bytes_to_human $((dd_size * 1024))))"
+        fi
+    else
+        ok "No DerivedData found"
+    fi
+
+    print_section "Xcode Archives"
+    if [[ -d ~/Library/Developer/Xcode/Archives ]]; then
+        local arch_size
+        arch_size=$(du -sk ~/Library/Developer/Xcode/Archives 2>/dev/null | awk '{print $1}')
+        if (( arch_size > 524288 )); then  # >512MB
+            warn "Xcode Archives: $(bytes_to_human $((arch_size * 1024)))"
+            read -rp "  Delete old archives? [y/N] " ans
+            if [[ "$ans" =~ ^[Yy] ]]; then
+                rm -rf ~/Library/Developer/Xcode/Archives/*
+                ok "Cleared Archives"
+                total_freed=$((total_freed + arch_size))
+            fi
+        else
+            ok "Archives are small"
+        fi
+    fi
+
+    print_section "iOS Device Support (old versions)"
+    if [[ -d ~/Library/Developer/Xcode/iOS\ DeviceSupport ]]; then
+        local ds_size
+        ds_size=$(du -sk ~/Library/Developer/Xcode/iOS\ DeviceSupport 2>/dev/null | awk '{print $1}')
+        if (( ds_size > 1048576 )); then
+            warn "iOS DeviceSupport: $(bytes_to_human $((ds_size * 1024)))"
+            read -rp "  Delete (will re-download when needed)? [y/N] " ans
+            if [[ "$ans" =~ ^[Yy] ]]; then
+                rm -rf ~/Library/Developer/Xcode/iOS\ DeviceSupport/*
+                ok "Cleared DeviceSupport"
+                total_freed=$((total_freed + ds_size))
+            fi
+        else
+            ok "DeviceSupport is small"
+        fi
+    fi
+
+    print_section "Android Studio / Gradle Caches"
+    if [[ -d ~/.gradle/caches ]]; then
+        local gradle_size
+        gradle_size=$(du -sk ~/.gradle/caches 2>/dev/null | awk '{print $1}')
+        if (( gradle_size > 2097152 )); then  # >2GB
+            warn "Gradle caches: $(bytes_to_human $((gradle_size * 1024)))"
+            read -rp "  Clear caches (will rebuild on next build)? [y/N] " ans
+            if [[ "$ans" =~ ^[Yy] ]]; then
+                rm -rf ~/.gradle/caches/*
+                ok "Cleared Gradle caches"
+                total_freed=$((total_freed + gradle_size))
+            fi
+        else
+            ok "Gradle caches are reasonable ($(bytes_to_human $((gradle_size * 1024))))"
+        fi
+    fi
+
+    print_section "Android Emulator Snapshots"
+    if [[ -d ~/.android/avd ]]; then
+        local avd_size
+        avd_size=$(du -sk ~/.android/avd 2>/dev/null | awk '{print $1}')
+        if (( avd_size > 5242880 )); then  # >5GB
+            warn "Android AVDs: $(bytes_to_human $((avd_size * 1024)))"
+            info "Consider removing unused emulator images via Android Studio"
+        else
+            ok "AVDs are reasonable"
+        fi
+    fi
+
+    print_section "CocoaPods Cache"
+    if [[ -d ~/Library/Caches/CocoaPods ]]; then
+        local pods_size
+        pods_size=$(du -sk ~/Library/Caches/CocoaPods 2>/dev/null | awk '{print $1}')
+        if (( pods_size > 1048576 )); then
+            warn "CocoaPods cache: $(bytes_to_human $((pods_size * 1024)))"
+            read -rp "  Clear? [y/N] " ans
+            if [[ "$ans" =~ ^[Yy] ]]; then
+                rm -rf ~/Library/Caches/CocoaPods/*
+                ok "Cleared CocoaPods cache"
+                total_freed=$((total_freed + pods_size))
+            fi
+        else
+            ok "CocoaPods cache is small"
+        fi
+    fi
+
+    print_section "npm / yarn / pnpm / bun Caches"
+    for cache_dir in ~/.npm/_cacache ~/.cache/yarn ~/.local/share/pnpm/store ~/.bun/install/cache; do
+        if [[ -d "$cache_dir" ]]; then
+            local c_size
+            c_size=$(du -sk "$cache_dir" 2>/dev/null | awk '{print $1}')
+            if (( c_size > 1048576 )); then
+                local cache_name
+                cache_name=$(basename "$(dirname "$cache_dir")")/$(basename "$cache_dir")
+                warn "${cache_name}: $(bytes_to_human $((c_size * 1024)))"
+                read -rp "  Clear? [y/N] " ans
+                if [[ "$ans" =~ ^[Yy] ]]; then
+                    rm -rf "$cache_dir"/*
+                    ok "Cleared ${cache_name}"
+                    total_freed=$((total_freed + c_size))
+                fi
+            fi
+        fi
+    done
+
+    print_section "Docker"
+    if command -v docker &>/dev/null; then
+        local docker_usage
+        docker_usage=$(docker system df 2>/dev/null | tail -n +2 | awk '{gsub(/[A-Za-z]/,"",$4); sum+=$4} END {printf "%.0f", sum}' || echo "0")
+        if (( docker_usage > 5 )); then
+            warn "Docker using significant space"
+            read -rp "  Run docker system prune? [y/N] " ans
+            if [[ "$ans" =~ ^[Yy] ]]; then
+                docker system prune -f 2>/dev/null
+                ok "Docker pruned"
+            fi
+        fi
+    fi
+
+    print_section "System Caches & Logs"
+    local log_size
+    log_size=$(du -sk ~/Library/Logs 2>/dev/null | awk '{print $1}')
+    if (( log_size > 524288 )); then  # >512MB
+        warn "User logs: $(bytes_to_human $((log_size * 1024)))"
+        read -rp "  Clear old logs? [y/N] " ans
+        if [[ "$ans" =~ ^[Yy] ]]; then
+            find ~/Library/Logs -type f -mtime +7 -delete 2>/dev/null
+            ok "Cleared logs older than 7 days"
+        fi
+    else
+        ok "Logs are reasonable"
+    fi
+
+    print_section "macOS System Cache"
+    info "Purging disk cache (may need password)..."
+    sudo purge 2>/dev/null && ok "Disk cache purged" || warn "Could not purge (needs sudo)"
+
+    if (( total_freed > 0 )); then
+        echo ""
+        ok "Total space freed: ~$(bytes_to_human $((total_freed * 1024)))"
+    fi
+    echo ""
+}
+
+cmd_optimize() {
+    print_header "Performance Optimization"
+
+    print_section "Memory Optimization"
+    info "Closing memory-heavy background apps is the #1 fix"
+    local heavy_apps
+    heavy_apps=$(ps -eo %mem,comm | sort -k1 -rn | awk '$1>3.0 && $2 !~ /kernel|WindowServer|Finder/ {print $2, $1"%"}' | head -5)
+    if [[ -n "$heavy_apps" ]]; then
+        warn "Consider closing these memory-heavy processes:"
+        echo "$heavy_apps" | while read -r app; do echo "    $app"; done
+    fi
+
+    print_section "Spotlight Indexing"
+    local mdworker_cpu
+    mdworker_cpu=$(ps aux | grep -i mdworker | grep -v grep | awk '{sum+=$3} END {printf "%.1f", sum+0}')
+    if (( $(echo "$mdworker_cpu > 10" | bc -l) )); then
+        warn "Spotlight is actively indexing (${mdworker_cpu}% CPU)"
+        info "To exclude dev folders: System Settings > Siri & Spotlight > Privacy"
+        info "Recommended exclusions: node_modules, build/, .gradle/, DerivedData/"
+    else
+        ok "Spotlight is idle"
+    fi
+
+    print_section "Time Machine"
+    local tm_cpu
+    tm_cpu=$(ps aux | grep -i "backupd\|tmutil" | grep -v grep | awk '{sum+=$3} END {printf "%.1f", sum+0}')
+    if (( $(echo "$tm_cpu > 5" | bc -l) )); then
+        warn "Time Machine is running (${tm_cpu}% CPU)"
+        info "To throttle: sudo sysctl debug.lowpri_throttle_enabled=0"
+    else
+        ok "Time Machine is idle"
+    fi
+
+    print_section "Login Items & Launch Agents"
+    local agent_count
+    agent_count=$(ls ~/Library/LaunchAgents/ 2>/dev/null | wc -l | tr -d ' ')
+    if (( agent_count > 10 )); then
+        warn "${agent_count} user launch agents found"
+        info "Review with: ls ~/Library/LaunchAgents/"
+        ls ~/Library/LaunchAgents/ 2>/dev/null | while read -r f; do echo "    $f"; done
+    else
+        ok "${agent_count} user launch agents (normal)"
+    fi
+
+    print_section "DNS Optimization"
+    local current_dns
+    current_dns=$(scutil --dns 2>/dev/null | grep "nameserver\[0\]" | head -1 | awk '{print $NF}')
+    info "Current primary DNS: ${current_dns:-unknown}"
+    if [[ "$current_dns" != "1.1.1.1" && "$current_dns" != "8.8.8.8" ]]; then
+        info "Consider switching to faster DNS (1.1.1.1 or 8.8.8.8)"
+        info "System Settings > Network > Wi-Fi > Details > DNS"
+    fi
+
+    print_section "macOS Performance Tweaks"
+    info "Reduce motion: System Settings > Accessibility > Display > Reduce motion"
+    info "Reduce transparency: System Settings > Accessibility > Display > Reduce transparency"
+
+    local anim_speed
+    anim_speed=$(defaults read NSGlobalDomain NSWindowResizeTime 2>/dev/null || echo "not set")
+    if [[ "$anim_speed" == "not set" ]]; then
+        info "Speed up window animations?"
+        read -rp "  Apply? [y/N] " ans
+        if [[ "$ans" =~ ^[Yy] ]]; then
+            defaults write NSGlobalDomain NSWindowResizeTime -float 0.1
+            defaults write com.apple.dock autohide-time-modifier -float 0.25
+            defaults write com.apple.dock autohide-delay -float 0
+            defaults write NSGlobalDomain NSAutomaticWindowAnimationsEnabled -bool false
+            ok "Animation speed optimized (restart Dock: killall Dock)"
+        fi
+    else
+        ok "Window animations already optimized"
+    fi
+
+    echo ""
+}
+
+cmd_dev() {
+    print_header "Developer Environment Health"
+
+    print_section "Android Development"
+    if command -v java &>/dev/null; then
+        ok "Java: $(java -version 2>&1 | head -1)"
+    else
+        warn "Java not found"
+    fi
+    if [[ -d "$HOME/Library/Android/sdk" ]] || [[ -n "${ANDROID_HOME:-}" ]]; then
+        ok "Android SDK found"
+        local emulators_running
+        emulators_running=$(ps aux | grep -i emulator | grep -v grep | wc -l | tr -d ' ')
+        if (( emulators_running > 0 )); then
+            warn "${emulators_running} emulator(s) running (heavy resource usage)"
+        fi
+    else
+        info "Android SDK not detected"
+    fi
+
+    print_section "iOS Development"
+    if command -v xcodebuild &>/dev/null; then
+        ok "Xcode: $(xcodebuild -version 2>/dev/null | head -1)"
+    else
+        info "Xcode not installed"
+    fi
+    local sims_running
+    sims_running=$(ps aux | grep -i "Simulator\|simctl" | grep -v grep | wc -l | tr -d ' ')
+    if (( sims_running > 2 )); then
+        warn "${sims_running} simulator processes running"
+    fi
+
+    print_section "Node.js / JS Tooling"
+    if command -v node &>/dev/null; then
+        ok "Node: $(node -v)"
+    fi
+    if command -v bun &>/dev/null; then
+        ok "Bun: $(bun -v)"
+    fi
+    local node_procs
+    node_procs=$(ps aux | grep -i "node\|tsx\|webpack\|vite\|esbuild" | grep -v grep | wc -l | tr -d ' ')
+    if (( node_procs > 10 )); then
+        warn "${node_procs} Node.js-related processes running"
+        info "You may have orphaned dev servers. Check with: macoptimize hogs"
+    fi
+
+    print_section "AI / LLM Tools"
+    for tool in ollama python3 docker; do
+        if command -v "$tool" &>/dev/null; then
+            local tool_procs
+            tool_procs=$(ps aux | grep -i "$tool" | grep -v grep | awk '{cpu+=$3; mem+=$4} END {if(NR>0) printf "CPU: %.1f%%, MEM: %.1f%%", cpu, mem}')
+            if [[ -n "$tool_procs" ]]; then
+                info "${tool}: running (${tool_procs})"
+            else
+                ok "${tool}: installed, idle"
+            fi
+        fi
+    done
+
+    print_section "Background Dev Processes"
+    info "Checking for potentially orphaned dev processes..."
+    local orphans=0
+    for pattern in "webpack" "vite" "next" "expo" "metro" "flutter" "dart" "gradle" "ng serve"; do
+        local count
+        count=$(pgrep -f "$pattern" 2>/dev/null | wc -l | tr -d ' ')
+        if (( count > 0 )); then
+            warn "${count} '${pattern}' process(es) running"
+            orphans=$((orphans + count))
+        fi
+    done
+    if (( orphans == 0 )); then
+        ok "No orphaned dev processes detected"
+    else
+        info "Kill orphaned processes with: macoptimize kill-devservers"
+    fi
+
+    echo ""
+}
+
+cmd_kill_devservers() {
+    print_header "Kill Orphaned Dev Servers"
+
+    local patterns=("webpack" "vite" "next-server" "expo" "metro" "flutter_tools" "gradle" "ng serve" "react-scripts")
+    for pattern in "${patterns[@]}"; do
+        local pids
+        pids=$(pgrep -f "$pattern" 2>/dev/null || true)
+        if [[ -n "$pids" ]]; then
+            warn "Found '${pattern}' processes: $pids"
+            read -rp "  Kill them? [y/N] " ans
+            if [[ "$ans" =~ ^[Yy] ]]; then
+                echo "$pids" | xargs kill 2>/dev/null
+                ok "Killed ${pattern} processes"
+            fi
+        fi
+    done
+    ok "Done scanning for dev servers"
+    echo ""
+}
+
+cmd_monitor() {
+    print_header "Live System Monitor (Ctrl+C to stop)"
+    echo ""
+
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}macoptimize monitor${NC} - $(date '+%H:%M:%S')  (Ctrl+C to stop)"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+        # CPU
+        local cpu_usage
+        cpu_usage=$(ps -A -o %cpu | awk '{s+=$1} END {printf "%.1f", s}')
+        local cpu_count
+        cpu_count=$(sysctl -n hw.ncpu)
+        local cpu_pct
+        cpu_pct=$(echo "scale=1; $cpu_usage / $cpu_count" | bc)
+        echo -e "\n  ${BOLD}CPU:${NC} ${cpu_pct}% avg/core  (${cpu_usage}% total across ${cpu_count} cores)"
+
+        # Memory
+        local mem_free
+        mem_free=$(memory_pressure 2>/dev/null | grep "System-wide memory free percentage" | awk '{print $NF}' || echo "?%")
+        echo -e "  ${BOLD}MEM:${NC} ${mem_free} free"
+
+        # Swap
+        local swap
+        swap=$(sysctl -n vm.swapusage 2>/dev/null | awk -F'used = ' '{print $2}' | awk '{print $1}')
+        echo -e "  ${BOLD}SWAP:${NC} ${swap:-unknown} used"
+
+        # Thermal
+        local therm
+        therm=$(pmset -g therm 2>/dev/null | grep "CPU_Speed_Limit" | awk '{print $NF}')
+        if [[ -n "$therm" ]] && (( therm < 100 )); then
+            echo -e "  ${BOLD}THERMAL:${NC} ${RED}Throttled to ${therm}%${NC}"
+        else
+            echo -e "  ${BOLD}THERMAL:${NC} ${GREEN}OK${NC}"
+        fi
+
+        # Top 5 CPU
+        echo -e "\n  ${BOLD}Top CPU:${NC}"
+        ps -eo pid,%cpu,%mem,comm | sort -k2 -rn | head -5 | awk '{printf "    %-5s %-6s %-6s %s\n", $1, $2"%", $3"%", $4}'
+
+        # Top 5 MEM
+        echo -e "\n  ${BOLD}Top MEM:${NC}"
+        ps -eo pid,%cpu,%mem,comm | sort -k3 -rn | head -5 | awk '{printf "    %-5s %-6s %-6s %s\n", $1, $2"%", $3"%", $4}'
+
+        sleep 3
+    done
+}
+
+cmd_quick() {
+    print_header "Quick Optimization (Safe Actions)"
+
+    info "Flushing DNS cache..."
+    sudo dscacheutil -flushcache 2>/dev/null && sudo killall -HUP mDNSResponder 2>/dev/null && ok "DNS cache flushed" || warn "DNS flush needs sudo"
+
+    info "Purging memory cache..."
+    sudo purge 2>/dev/null && ok "Memory cache purged" || warn "Purge needs sudo"
+
+    info "Clearing font caches..."
+    sudo atsutil databases -remove 2>/dev/null && ok "Font caches cleared" || warn "Font cache clear needs sudo"
+
+    info "Restarting Finder..."
+    killall Finder 2>/dev/null && ok "Finder restarted" || true
+
+    info "Restarting Dock..."
+    killall Dock 2>/dev/null && ok "Dock restarted" || true
+
+    info "Clearing temporary files..."
+    rm -rf /tmp/com.apple.* 2>/dev/null || true
+    rm -rf ~/Library/Caches/com.apple.dt.Xcode/Downloads/* 2>/dev/null || true
+    ok "Temp files cleaned"
+
+    echo ""
+    ok "Quick optimization complete! Run 'macoptimize status' to see current health."
+    echo ""
+}
+
+cmd_help() {
+    echo -e "${BOLD}${CYAN}"
+    echo "  ┌─────────────────────────────────────────────────┐"
+    echo "  │        macoptimize v${VERSION}                       │"
+    echo "  │    MacBook Pro M1 Performance Optimizer          │"
+    echo "  └─────────────────────────────────────────────────┘"
+    echo -e "${NC}"
+    echo -e "  ${BOLD}Usage:${NC} macoptimize <command>"
+    echo ""
+    echo -e "  ${BOLD}Commands:${NC}"
+    echo -e "    ${GREEN}status${NC}           System health report & overview"
+    echo -e "    ${GREEN}hogs${NC}             Detect resource hogs & abnormal processes"
+    echo -e "    ${GREEN}monitor${NC}          Live system monitor (refreshes every 3s)"
+    echo -e "    ${GREEN}clean${NC}            Interactive cleanup (Xcode, Gradle, caches)"
+    echo -e "    ${GREEN}optimize${NC}         Apply performance optimizations"
+    echo -e "    ${GREEN}quick${NC}            Quick safe optimizations (DNS, cache, etc)"
+    echo -e "    ${GREEN}dev${NC}              Developer environment health check"
+    echo -e "    ${GREEN}kill-devservers${NC}  Kill orphaned dev servers"
+    echo -e "    ${GREEN}all${NC}              Run status + hogs + dev (full report)"
+    echo -e "    ${GREEN}help${NC}             Show this help"
+    echo ""
+    echo -e "  ${BOLD}Examples:${NC}"
+    echo "    macoptimize status          # Quick health check"
+    echo "    macoptimize all             # Full system report"
+    echo "    macoptimize clean           # Free up disk space"
+    echo "    macoptimize quick           # Fast safe optimizations"
+    echo "    macoptimize monitor         # Live monitoring"
+    echo ""
+}
+
+cmd_all() {
+    cmd_status
+    cmd_hogs
+    cmd_dev
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+case "${1:-help}" in
+    status)          cmd_status ;;
+    hogs)            cmd_hogs ;;
+    monitor)         cmd_monitor ;;
+    clean)           cmd_clean ;;
+    optimize)        cmd_optimize ;;
+    quick)           cmd_quick ;;
+    dev)             cmd_dev ;;
+    kill-devservers) cmd_kill_devservers ;;
+    all)             cmd_all ;;
+    help|--help|-h)  cmd_help ;;
+    *)
+        echo -e "${RED}Unknown command: $1${NC}"
+        cmd_help
+        exit 1
+        ;;
+esac
