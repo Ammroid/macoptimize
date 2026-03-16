@@ -820,8 +820,9 @@ _tui_storage_main() {
 
     # Add large files entry if found
     local total_large_kb=0
-    for s in "${LARGE_SIZES[@]}"; do
-        total_large_kb=$((total_large_kb + s))
+    local large_count=${#LARGE_NAMES[@]}
+    for (( i=0; i<large_count; i++ )); do
+        total_large_kb=$((total_large_kb + LARGE_SIZES[i]))
     done
 
     # Selected state for multi-select
