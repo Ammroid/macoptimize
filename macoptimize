@@ -6,7 +6,7 @@
 
 set -uo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -511,6 +511,869 @@ cmd_dev() {
     echo ""
 }
 
+# ─── Storage Manager (Interactive TUI) ────────────────────────────────────────
+
+# Color for amber/copper accent
+AMBER='\033[38;5;208m'
+DIM='\033[2m'
+
+# Get size of a directory in KB (returns 0 if missing)
+_dir_size_kb() {
+    if [[ -d "$1" ]]; then
+        du -sk "$1" 2>/dev/null | awk '{print $1}'
+    else
+        echo 0
+    fi
+}
+
+# Convert KB to human-readable
+_kb_to_human() {
+    local kb=$1
+    if (( kb >= 1048576 )); then
+        echo "$(echo "scale=1; $kb/1048576" | bc)G"
+    elif (( kb >= 1024 )); then
+        echo "$(echo "scale=0; $kb/1024" | bc)M"
+    else
+        echo "${kb}K"
+    fi
+}
+
+# Build the storage scan data into arrays
+_storage_scan() {
+    SCAN_NAMES=()
+    SCAN_SIZES=()    # in KB
+    SCAN_PATHS=()
+    SCAN_SAFETY=()   # green / yellow
+    SCAN_TYPES=()    # cache / trash / downloads / large / docker / sim
+
+    # Trash
+    local trash_kb
+    trash_kb=$(_dir_size_kb ~/.Trash)
+    if (( trash_kb > 1024 )); then
+        SCAN_NAMES+=("Trash")
+        SCAN_SIZES+=("$trash_kb")
+        SCAN_PATHS+=("$HOME/.Trash")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("trash")
+    fi
+
+    # Xcode DerivedData
+    local dd_kb
+    dd_kb=$(_dir_size_kb ~/Library/Developer/Xcode/DerivedData)
+    if (( dd_kb > 102400 )); then
+        SCAN_NAMES+=("Xcode DerivedData")
+        SCAN_SIZES+=("$dd_kb")
+        SCAN_PATHS+=("$HOME/Library/Developer/Xcode/DerivedData")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # Xcode Archives
+    local arch_kb
+    arch_kb=$(_dir_size_kb ~/Library/Developer/Xcode/Archives)
+    if (( arch_kb > 102400 )); then
+        SCAN_NAMES+=("Xcode Archives")
+        SCAN_SIZES+=("$arch_kb")
+        SCAN_PATHS+=("$HOME/Library/Developer/Xcode/Archives")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # iOS DeviceSupport
+    local ds_kb
+    ds_kb=$(_dir_size_kb ~/Library/Developer/Xcode/iOS\ DeviceSupport)
+    if (( ds_kb > 102400 )); then
+        SCAN_NAMES+=("iOS DeviceSupport")
+        SCAN_SIZES+=("$ds_kb")
+        SCAN_PATHS+=("$HOME/Library/Developer/Xcode/iOS DeviceSupport")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # iOS Simulators
+    local sim_kb
+    sim_kb=$(_dir_size_kb ~/Library/Developer/CoreSimulator/Devices)
+    if (( sim_kb > 1048576 )); then
+        SCAN_NAMES+=("iOS Simulators")
+        SCAN_SIZES+=("$sim_kb")
+        SCAN_PATHS+=("$HOME/Library/Developer/CoreSimulator/Devices")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("sim")
+    fi
+
+    # Gradle caches
+    local gradle_kb
+    gradle_kb=$(_dir_size_kb ~/.gradle/caches)
+    if (( gradle_kb > 102400 )); then
+        SCAN_NAMES+=("Gradle caches")
+        SCAN_SIZES+=("$gradle_kb")
+        SCAN_PATHS+=("$HOME/.gradle/caches")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # CocoaPods cache
+    local pods_kb
+    pods_kb=$(_dir_size_kb ~/Library/Caches/CocoaPods)
+    if (( pods_kb > 102400 )); then
+        SCAN_NAMES+=("CocoaPods cache")
+        SCAN_SIZES+=("$pods_kb")
+        SCAN_PATHS+=("$HOME/Library/Caches/CocoaPods")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # npm cache
+    local npm_kb
+    npm_kb=$(_dir_size_kb ~/.npm/_cacache)
+    if (( npm_kb > 102400 )); then
+        SCAN_NAMES+=("npm cache")
+        SCAN_SIZES+=("$npm_kb")
+        SCAN_PATHS+=("$HOME/.npm/_cacache")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # yarn cache
+    local yarn_kb
+    yarn_kb=$(_dir_size_kb ~/.cache/yarn)
+    if (( yarn_kb > 102400 )); then
+        SCAN_NAMES+=("yarn cache")
+        SCAN_SIZES+=("$yarn_kb")
+        SCAN_PATHS+=("$HOME/.cache/yarn")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # pnpm store
+    local pnpm_kb
+    pnpm_kb=$(_dir_size_kb ~/.local/share/pnpm/store)
+    if (( pnpm_kb > 102400 )); then
+        SCAN_NAMES+=("pnpm store")
+        SCAN_SIZES+=("$pnpm_kb")
+        SCAN_PATHS+=("$HOME/.local/share/pnpm/store")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # bun cache
+    local bun_kb
+    bun_kb=$(_dir_size_kb ~/.bun/install/cache)
+    if (( bun_kb > 102400 )); then
+        SCAN_NAMES+=("bun cache")
+        SCAN_SIZES+=("$bun_kb")
+        SCAN_PATHS+=("$HOME/.bun/install/cache")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # Homebrew cache
+    if command -v brew &>/dev/null; then
+        local brew_cache
+        brew_cache=$(brew --cache 2>/dev/null)
+        if [[ -n "$brew_cache" && -d "$brew_cache" ]]; then
+            local brew_kb
+            brew_kb=$(_dir_size_kb "$brew_cache")
+            if (( brew_kb > 102400 )); then
+                SCAN_NAMES+=("Homebrew cache")
+                SCAN_SIZES+=("$brew_kb")
+                SCAN_PATHS+=("$brew_cache")
+                SCAN_SAFETY+=("green")
+                SCAN_TYPES+=("cache")
+            fi
+        fi
+    fi
+
+    # pip cache
+    local pip_kb
+    pip_kb=$(_dir_size_kb ~/Library/Caches/pip)
+    if (( pip_kb > 102400 )); then
+        SCAN_NAMES+=("pip cache")
+        SCAN_SIZES+=("$pip_kb")
+        SCAN_PATHS+=("$HOME/Library/Caches/pip")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # System logs
+    local log_kb
+    log_kb=$(_dir_size_kb ~/Library/Logs)
+    if (( log_kb > 102400 )); then
+        SCAN_NAMES+=("User logs")
+        SCAN_SIZES+=("$log_kb")
+        SCAN_PATHS+=("$HOME/Library/Logs")
+        SCAN_SAFETY+=("green")
+        SCAN_TYPES+=("cache")
+    fi
+
+    # Downloads older than 90 days (yellow — review needed)
+    local old_dl_kb=0
+    if [[ -d ~/Downloads ]]; then
+        old_dl_kb=$(find ~/Downloads -maxdepth 1 -type f -mtime +90 -exec du -sk {} + 2>/dev/null | awk '{s+=$1} END {printf "%d", s+0}')
+        if (( old_dl_kb > 102400 )); then
+            SCAN_NAMES+=("Downloads (>90 days old)")
+            SCAN_SIZES+=("$old_dl_kb")
+            SCAN_PATHS+=("$HOME/Downloads")
+            SCAN_SAFETY+=("yellow")
+            SCAN_TYPES+=("downloads")
+        fi
+    fi
+}
+
+# Build large files list using mdfind (Spotlight)
+_scan_large_files() {
+    LARGE_NAMES=()
+    LARGE_SIZES=()
+    LARGE_PATHS=()
+    LARGE_AGES=()
+
+    # Find files >500MB, not in system/library dirs
+    local ninety_days_ago
+    ninety_days_ago=$(date -v-90d +%Y-%m-%d 2>/dev/null || date -d '90 days ago' +%Y-%m-%d 2>/dev/null)
+
+    while IFS= read -r filepath; do
+        [[ -z "$filepath" ]] && continue
+        # Skip system, library framework, and app bundle paths
+        case "$filepath" in
+            /System/*|/Library/*|/Applications/*.app/*|/usr/*|/private/*) continue ;;
+            */node_modules/*|*/.git/*|*/DerivedData/*) continue ;;
+        esac
+        [[ ! -f "$filepath" ]] && continue
+
+        local fsize_bytes
+        fsize_bytes=$(stat -f%z "$filepath" 2>/dev/null || echo 0)
+        (( fsize_bytes < 524288000 )) && continue  # skip < 500MB
+
+        local fsize_kb=$(( fsize_bytes / 1024 ))
+
+        # Check last used date
+        local last_used
+        last_used=$(mdls -name kMDItemLastUsedDate -raw "$filepath" 2>/dev/null)
+        local age_label="unknown"
+        if [[ -n "$last_used" && "$last_used" != "(null)" ]]; then
+            local last_ts
+            last_ts=$(date -j -f "%Y-%m-%d %H:%M:%S %z" "$last_used" +%s 2>/dev/null || echo 0)
+            if (( last_ts > 0 )); then
+                local now_ts
+                now_ts=$(date +%s)
+                local days_ago=$(( (now_ts - last_ts) / 86400 ))
+                age_label="${days_ago} days ago"
+            fi
+        else
+            # Fallback to modification time
+            local mod_ts
+            mod_ts=$(stat -f%m "$filepath" 2>/dev/null || echo 0)
+            if (( mod_ts > 0 )); then
+                local now_ts
+                now_ts=$(date +%s)
+                local days_ago=$(( (now_ts - mod_ts) / 86400 ))
+                age_label="${days_ago}d (modified)"
+            fi
+        fi
+
+        local fname
+        fname=$(basename "$filepath")
+        LARGE_NAMES+=("$fname")
+        LARGE_SIZES+=("$fsize_kb")
+        LARGE_PATHS+=("$filepath")
+        LARGE_AGES+=("$age_label")
+    done < <(mdfind 'kMDItemFSSize >= 524288000' 2>/dev/null | head -50)
+
+    # Sort by size descending (simple bubble — list is small)
+    local n=${#LARGE_SIZES[@]}
+    for (( i=0; i<n; i++ )); do
+        for (( j=i+1; j<n; j++ )); do
+            if (( LARGE_SIZES[j] > LARGE_SIZES[i] )); then
+                local tmp
+                tmp="${LARGE_SIZES[i]}"; LARGE_SIZES[i]="${LARGE_SIZES[j]}"; LARGE_SIZES[j]="$tmp"
+                tmp="${LARGE_NAMES[i]}"; LARGE_NAMES[i]="${LARGE_NAMES[j]}"; LARGE_NAMES[j]="$tmp"
+                tmp="${LARGE_PATHS[i]}"; LARGE_PATHS[i]="${LARGE_PATHS[j]}"; LARGE_PATHS[j]="$tmp"
+                tmp="${LARGE_AGES[i]}"; LARGE_AGES[i]="${LARGE_AGES[j]}"; LARGE_AGES[j]="$tmp"
+            fi
+        done
+    done
+}
+
+# ── Interactive TUI ───────────────────────────────────────────────────────────
+
+_tui_draw_bar() {
+    local pct=$1 width=$2
+    local filled=$(( pct * width / 100 ))
+    local empty=$(( width - filled ))
+    local color="${GREEN}"
+    if (( pct > 90 )); then
+        color="${RED}"
+    elif (( pct > 75 )); then
+        color="${YELLOW}"
+    fi
+    printf "${color}"
+    for (( i=0; i<filled; i++ )); do printf "█"; done
+    printf "${DIM}"
+    for (( i=0; i<empty; i++ )); do printf "░"; done
+    printf "${NC}"
+}
+
+_tui_storage_main() {
+    local selected=0
+    local total_freed_kb=0
+    local item_count=${#SCAN_NAMES[@]}
+
+    # Add large files entry if found
+    local total_large_kb=0
+    for s in "${LARGE_SIZES[@]}"; do
+        total_large_kb=$((total_large_kb + s))
+    done
+
+    # Selected state for multi-select
+    local -a checked
+    for (( i=0; i<item_count; i++ )); do
+        checked+=("0")
+    done
+
+    local running=1
+    tput civis  # hide cursor
+
+    # Cleanup on exit
+    trap 'tput cnorm; echo ""; return 0' INT TERM
+
+    while (( running )); do
+        # Get disk info
+        local disk_pct
+        disk_pct=$(df -h / | tail -1 | awk '{print $5}' | tr -d '%')
+        local disk_used
+        disk_used=$(df -h / | tail -1 | awk '{print $3}')
+        local disk_free
+        disk_free=$(df -h / | tail -1 | awk '{print $4}')
+        local disk_total
+        disk_total=$(df -h / | tail -1 | awk '{print $2}')
+
+        tput clear
+
+        # Header
+        echo -e " ${BOLD}STORAGE MANAGER${NC}${DIM}                              macoptimize v${VERSION}${NC}"
+        echo -e " ${AMBER}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+
+        # Disk gauge
+        printf "  "
+        _tui_draw_bar "$disk_pct" 40
+        printf "  %s%% used\n" "$disk_pct"
+        echo -e "  ${BOLD}${disk_free}${NC} free of ${disk_total}  │  Used: ${disk_used}"
+
+        if (( total_freed_kb > 0 )); then
+            echo -e "  ${GREEN}✓ Freed this session: $(_kb_to_human $total_freed_kb)${NC}"
+        fi
+        echo ""
+
+        # Column headers
+        echo -e "  ${DIM}CLEANABLE ITEMS                              SIZE       STATUS${NC}"
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
+
+        # List items
+        for (( i=0; i<item_count; i++ )); do
+            local marker="  "
+            local name_color="${NC}"
+            if (( i == selected )); then
+                marker="${BOLD}›${NC} "
+                name_color="${BOLD}"
+            fi
+
+            local safety_icon
+            if [[ "${SCAN_SAFETY[$i]}" == "green" ]]; then
+                safety_icon="${GREEN}🟢${NC}"
+            else
+                safety_icon="${YELLOW}🟡${NC}"
+            fi
+
+            local check_mark=" "
+            if [[ "${checked[$i]}" == "1" ]]; then
+                check_mark="${GREEN}✓${NC}"
+            fi
+
+            local size_str
+            size_str=$(_kb_to_human "${SCAN_SIZES[$i]}")
+
+            printf "  %b[%b] %b %-35b %8s   %b\n" \
+                "$marker" "$check_mark" "$safety_icon" \
+                "${name_color}${SCAN_NAMES[$i]}${NC}" \
+                "$size_str" \
+                "$( [[ ${SCAN_SAFETY[$i]} == "green" ]] && echo "${GREEN}safe${NC}" || echo "${YELLOW}review${NC}" )"
+        done
+
+        # Large files entry (if any)
+        if (( ${#LARGE_NAMES[@]} > 0 )); then
+            echo ""
+            local lf_marker="  "
+            if (( selected == item_count )); then
+                lf_marker="${BOLD}›${NC} "
+            fi
+            printf "  %b${YELLOW}🟡${NC} %-35b %8s   ${YELLOW}review${NC}\n" \
+                "$lf_marker" \
+                "${BOLD}Large files (>500MB)  [${#LARGE_NAMES[@]} found]${NC}" \
+                "$(_kb_to_human $total_large_kb)"
+        fi
+
+        # Footer
+        local max_idx=$item_count
+        if (( ${#LARGE_NAMES[@]} > 0 )); then
+            max_idx=$((item_count))
+        fi
+
+        echo ""
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
+        echo -e "  ${AMBER}↑↓${NC} move  ${AMBER}space${NC} select  ${AMBER}enter${NC} clean selected  ${AMBER}a${NC} select all safe"
+        echo -e "  ${AMBER}r${NC}  review item  ${AMBER}o${NC} open in Finder  ${AMBER}l${NC} large files  ${AMBER}q${NC} quit"
+
+        # Read key
+        local key=""
+        read -rsn1 key
+        case "$key" in
+            $'\x1b')
+                read -rsn2 key
+                case "$key" in
+                    '[A')  # Up
+                        if (( selected > 0 )); then
+                            selected=$((selected - 1))
+                        fi
+                        ;;
+                    '[B')  # Down
+                        local max_sel=$((item_count - 1))
+                        if (( ${#LARGE_NAMES[@]} > 0 )); then
+                            max_sel=$item_count
+                        fi
+                        if (( selected < max_sel )); then
+                            selected=$((selected + 1))
+                        fi
+                        ;;
+                esac
+                ;;
+            ' ')  # Space — toggle select
+                if (( selected < item_count )); then
+                    if [[ "${checked[$selected]}" == "0" ]]; then
+                        checked[$selected]="1"
+                    else
+                        checked[$selected]="0"
+                    fi
+                fi
+                ;;
+            'a'|'A')  # Select all safe (green) items
+                for (( i=0; i<item_count; i++ )); do
+                    if [[ "${SCAN_SAFETY[$i]}" == "green" ]]; then
+                        checked[$i]="1"
+                    fi
+                done
+                ;;
+            'o'|'O')  # Open in Finder
+                if (( selected < item_count )); then
+                    open "${SCAN_PATHS[$selected]}" 2>/dev/null
+                elif (( selected == item_count && ${#LARGE_NAMES[@]} > 0 )); then
+                    # Open first large file's parent dir
+                    open "$(dirname "${LARGE_PATHS[0]}")" 2>/dev/null
+                fi
+                ;;
+            'r'|'R')  # Review — show details for selected item
+                if (( selected < item_count )); then
+                    if [[ "${SCAN_TYPES[$selected]}" == "downloads" ]]; then
+                        _tui_review_downloads
+                    else
+                        _tui_review_item "$selected"
+                    fi
+                fi
+                ;;
+            'l'|'L')  # Large files view
+                if (( ${#LARGE_NAMES[@]} > 0 )); then
+                    _tui_large_files
+                fi
+                ;;
+            ''|$'\n')  # Enter — clean all checked items
+                local has_checked=0
+                for c in "${checked[@]}"; do
+                    if [[ "$c" == "1" ]]; then has_checked=1; break; fi
+                done
+                if (( has_checked )); then
+                    _tui_clean_checked checked SCAN_NAMES SCAN_SIZES SCAN_PATHS SCAN_SAFETY SCAN_TYPES total_freed_kb
+                    # Re-scan after cleaning
+                    _storage_scan
+                    item_count=${#SCAN_NAMES[@]}
+                    checked=()
+                    for (( i=0; i<item_count; i++ )); do checked+=("0"); done
+                    if (( selected >= item_count )); then
+                        selected=$((item_count > 0 ? item_count - 1 : 0))
+                    fi
+                fi
+                ;;
+            'q'|'Q')
+                running=0
+                ;;
+        esac
+    done
+
+    tput cnorm  # restore cursor
+    echo ""
+    if (( total_freed_kb > 0 )); then
+        echo -e "  ${GREEN}✓ Total freed: $(_kb_to_human $total_freed_kb)${NC}"
+    fi
+    echo ""
+}
+
+_tui_clean_checked() {
+    local -n _checked=$1
+    local -n _names=$2
+    local -n _sizes=$3
+    local -n _paths=$4
+    local -n _safety=$5
+    local -n _types=$6
+    local -n _freed=$7
+
+    tput clear
+    echo -e " ${BOLD}CLEANING SELECTED ITEMS${NC}"
+    echo -e " ${AMBER}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    # Show what will be cleaned
+    local clean_total_kb=0
+    for (( i=0; i<${#_checked[@]}; i++ )); do
+        if [[ "${_checked[$i]}" == "1" ]]; then
+            echo -e "  ${AMBER}▸${NC} ${_names[$i]} ($(_kb_to_human "${_sizes[$i]}"))"
+            clean_total_kb=$((clean_total_kb + _sizes[$i]))
+        fi
+    done
+    echo ""
+    echo -e "  Total: ${BOLD}$(_kb_to_human $clean_total_kb)${NC} will be freed"
+    echo ""
+    read -rp "  Proceed? [y/N] " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        return
+    fi
+
+    echo ""
+    for (( i=0; i<${#_checked[@]}; i++ )); do
+        if [[ "${_checked[$i]}" == "1" ]]; then
+            printf "  Cleaning %s..." "${_names[$i]}"
+            local path="${_paths[$i]}"
+            case "${_types[$i]}" in
+                trash)
+                    rm -rf "$path"/* 2>/dev/null
+                    ;;
+                cache|sim)
+                    rm -rf "$path"/* 2>/dev/null
+                    ;;
+                downloads)
+                    # Only delete files older than 90 days
+                    find "$path" -maxdepth 1 -type f -mtime +90 -delete 2>/dev/null
+                    ;;
+            esac
+            echo -e " ${GREEN}✓${NC}"
+            _freed=$((_freed + _sizes[$i]))
+        fi
+    done
+
+    echo ""
+    echo -e "  ${GREEN}✓ Freed $(_kb_to_human $clean_total_kb)${NC}"
+    echo ""
+    read -rsn1 -p "  Press any key to continue..."
+}
+
+_tui_review_item() {
+    local idx=$1
+    local path="${SCAN_PATHS[$idx]}"
+
+    tput clear
+    echo -e " ${BOLD}REVIEW: ${SCAN_NAMES[$idx]}${NC}"
+    echo -e " ${AMBER}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${DIM}Path:${NC} $path"
+    echo -e "  ${DIM}Size:${NC} $(_kb_to_human "${SCAN_SIZES[$idx]}")"
+    echo -e "  ${DIM}Safety:${NC} $( [[ ${SCAN_SAFETY[$idx]} == "green" ]] && echo "${GREEN}Safe to delete — regenerates automatically${NC}" || echo "${YELLOW}Review recommended before deleting${NC}" )"
+    echo ""
+
+    # Show top items in the directory
+    echo -e "  ${DIM}CONTENTS (largest first)${NC}"
+    echo -e "  ${DIM}──────────────────────────────────────────────────────────${NC}"
+
+    if [[ -d "$path" ]]; then
+        du -sh "$path"/* 2>/dev/null | sort -rh | head -15 | while IFS=$'\t' read -r size item; do
+            local name
+            name=$(basename "$item")
+            printf "  %8s  %s\n" "$size" "$name"
+        done
+    fi
+
+    echo ""
+    echo -e "  ${AMBER}o${NC} open in Finder  ${AMBER}esc/q${NC} back"
+
+    while true; do
+        read -rsn1 key
+        case "$key" in
+            'o'|'O') open "$path" 2>/dev/null ;;
+            'q'|'Q'|$'\x1b') break ;;
+        esac
+    done
+}
+
+_tui_review_downloads() {
+    tput clear
+    echo -e " ${BOLD}REVIEW: Downloads (>90 days old)${NC}"
+    echo -e " ${AMBER}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    local dl_files=()
+    local dl_sizes=()
+    local dl_ages=()
+    local dl_paths=()
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local fpath="$line"
+        local fsize_kb
+        fsize_kb=$(du -sk "$fpath" 2>/dev/null | awk '{print $1}')
+        local mod_ts
+        mod_ts=$(stat -f%m "$fpath" 2>/dev/null || echo 0)
+        local days_ago=0
+        if (( mod_ts > 0 )); then
+            days_ago=$(( ($(date +%s) - mod_ts) / 86400 ))
+        fi
+        local fname
+        fname=$(basename "$fpath")
+        dl_files+=("$fname")
+        dl_sizes+=("$fsize_kb")
+        dl_ages+=("$days_ago")
+        dl_paths+=("$fpath")
+    done < <(find ~/Downloads -maxdepth 1 -type f -mtime +90 2>/dev/null | head -30)
+
+    if (( ${#dl_files[@]} == 0 )); then
+        echo "  No old downloads found."
+        read -rsn1 -p "  Press any key to go back..."
+        return
+    fi
+
+    local sel=0
+    local dl_running=1
+    local -a dl_checked
+    for (( i=0; i<${#dl_files[@]}; i++ )); do dl_checked+=("0"); done
+
+    while (( dl_running )); do
+        tput cup 3 0
+        tput ed
+
+        echo -e "  ${DIM}FILE                                SIZE     AGE${NC}"
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────${NC}"
+
+        for (( i=0; i<${#dl_files[@]}; i++ )); do
+            local m="  "
+            if (( i == sel )); then m="${BOLD}›${NC} "; fi
+            local ck=" "
+            if [[ "${dl_checked[$i]}" == "1" ]]; then ck="${GREEN}✓${NC}"; fi
+
+            local display_name="${dl_files[$i]}"
+            if (( ${#display_name} > 32 )); then
+                display_name="${display_name:0:29}..."
+            fi
+
+            printf "  %b[%b] %-32b %8s  %4s days\n" \
+                "$m" "$ck" "$display_name" \
+                "$(_kb_to_human "${dl_sizes[$i]}")" \
+                "${dl_ages[$i]}"
+        done
+
+        echo ""
+        echo -e "  ${AMBER}↑↓${NC} move  ${AMBER}space${NC} select  ${AMBER}d${NC} delete selected  ${AMBER}o${NC} open  ${AMBER}q${NC} back"
+
+        read -rsn1 key
+        case "$key" in
+            $'\x1b')
+                read -rsn2 key
+                case "$key" in
+                    '[A') (( sel > 0 )) && sel=$((sel - 1)) ;;
+                    '[B') (( sel < ${#dl_files[@]} - 1 )) && sel=$((sel + 1)) ;;
+                esac
+                ;;
+            ' ') # Toggle
+                if [[ "${dl_checked[$sel]}" == "0" ]]; then
+                    dl_checked[$sel]="1"
+                else
+                    dl_checked[$sel]="0"
+                fi
+                ;;
+            'o'|'O')
+                open "${dl_paths[$sel]}" 2>/dev/null
+                ;;
+            'd'|'D')
+                local del_count=0
+                for (( i=0; i<${#dl_checked[@]}; i++ )); do
+                    if [[ "${dl_checked[$i]}" == "1" ]]; then del_count=$((del_count + 1)); fi
+                done
+                if (( del_count > 0 )); then
+                    echo ""
+                    read -rp "  Delete $del_count file(s)? [y/N] " ans
+                    if [[ "$ans" =~ ^[Yy] ]]; then
+                        for (( i=${#dl_checked[@]}-1; i>=0; i-- )); do
+                            if [[ "${dl_checked[$i]}" == "1" ]]; then
+                                rm -f "${dl_paths[$i]}" 2>/dev/null
+                            fi
+                        done
+                        # Rebuild list
+                        dl_running=0
+                    fi
+                fi
+                ;;
+            'q'|'Q'|$'\x1b') dl_running=0 ;;
+        esac
+    done
+}
+
+_tui_large_files() {
+    if (( ${#LARGE_NAMES[@]} == 0 )); then return; fi
+
+    local sel=0
+    local lf_running=1
+    local -a lf_checked
+    for (( i=0; i<${#LARGE_NAMES[@]}; i++ )); do lf_checked+=("0"); done
+
+    while (( lf_running )); do
+        tput clear
+        echo -e " ${BOLD}LARGE FILES (>500MB)${NC}"
+        echo -e " ${AMBER}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "  ${DIM}FILE                                SIZE     LAST USED${NC}"
+        echo -e "  ${DIM}──────────────────────────────────────────────────────────────${NC}"
+
+        for (( i=0; i<${#LARGE_NAMES[@]}; i++ )); do
+            local m="  "
+            if (( i == sel )); then m="${BOLD}›${NC} "; fi
+            local ck=" "
+            if [[ "${lf_checked[$i]}" == "1" ]]; then ck="${GREEN}✓${NC}"; fi
+
+            local display_name="${LARGE_NAMES[$i]}"
+            if (( ${#display_name} > 32 )); then
+                display_name="${display_name:0:29}..."
+            fi
+
+            printf "  %b[%b] %-32b %8s  %s\n" \
+                "$m" "$ck" "$display_name" \
+                "$(_kb_to_human "${LARGE_SIZES[$i]}")" \
+                "${LARGE_AGES[$i]}"
+        done
+
+        echo ""
+        echo -e "  ${DIM}Path:${NC} ${LARGE_PATHS[$sel]}"
+        echo ""
+        echo -e "  ${AMBER}↑↓${NC} move  ${AMBER}space${NC} select  ${AMBER}d${NC} delete selected  ${AMBER}o${NC} open in Finder  ${AMBER}q${NC} back"
+
+        read -rsn1 key
+        case "$key" in
+            $'\x1b')
+                read -rsn2 key
+                case "$key" in
+                    '[A') (( sel > 0 )) && sel=$((sel - 1)) ;;
+                    '[B') (( sel < ${#LARGE_NAMES[@]} - 1 )) && sel=$((sel + 1)) ;;
+                esac
+                ;;
+            ' ')
+                if [[ "${lf_checked[$sel]}" == "0" ]]; then
+                    lf_checked[$sel]="1"
+                else
+                    lf_checked[$sel]="0"
+                fi
+                ;;
+            'o'|'O')
+                open "$(dirname "${LARGE_PATHS[$sel]}")" 2>/dev/null
+                ;;
+            'd'|'D')
+                local del_count=0
+                local del_kb=0
+                for (( i=0; i<${#lf_checked[@]}; i++ )); do
+                    if [[ "${lf_checked[$i]}" == "1" ]]; then
+                        del_count=$((del_count + 1))
+                        del_kb=$((del_kb + LARGE_SIZES[i]))
+                    fi
+                done
+                if (( del_count > 0 )); then
+                    echo ""
+                    echo -e "  ${RED}⚠ These are NOT cache files. Deletion is permanent.${NC}"
+                    read -rp "  Delete $del_count file(s) ($(_kb_to_human $del_kb))? [y/N] " ans
+                    if [[ "$ans" =~ ^[Yy] ]]; then
+                        for (( i=${#lf_checked[@]}-1; i>=0; i-- )); do
+                            if [[ "${lf_checked[$i]}" == "1" ]]; then
+                                rm -f "${LARGE_PATHS[$i]}" 2>/dev/null
+                                echo -e "  ${GREEN}✓${NC} Deleted ${LARGE_NAMES[$i]}"
+                            fi
+                        done
+                        read -rsn1 -p "  Press any key..."
+                        # Rescan
+                        _scan_large_files
+                        if (( ${#LARGE_NAMES[@]} == 0 )); then
+                            lf_running=0
+                        else
+                            lf_checked=()
+                            for (( i=0; i<${#LARGE_NAMES[@]}; i++ )); do lf_checked+=("0"); done
+                            sel=0
+                        fi
+                    fi
+                fi
+                ;;
+            'q'|'Q') lf_running=0 ;;
+        esac
+    done
+}
+
+cmd_storage() {
+    # Non-interactive mode (for piping / scripting)
+    if [[ "${1:-}" == "--report" ]]; then
+        _storage_scan
+        print_header "Storage Report"
+
+        local disk_pct
+        disk_pct=$(df -h / | tail -1 | awk '{print $5}' | tr -d '%')
+        local disk_free
+        disk_free=$(df -h / | tail -1 | awk '{print $4}')
+        local disk_total
+        disk_total=$(df -h / | tail -1 | awk '{print $2}')
+
+        echo -e "  Disk: ${disk_pct}% used  │  ${disk_free} free of ${disk_total}"
+        if (( disk_pct > 90 )); then
+            bad "LOW STORAGE — apps may crash"
+        elif (( disk_pct > 75 )); then
+            warn "Storage getting low"
+        else
+            ok "Storage is healthy"
+        fi
+
+        echo ""
+        print_section "Cleanable Items"
+        for (( i=0; i<${#SCAN_NAMES[@]}; i++ )); do
+            local icon="🟢"
+            if [[ "${SCAN_SAFETY[$i]}" == "yellow" ]]; then icon="🟡"; fi
+            printf "  %s %-35s %8s\n" "$icon" "${SCAN_NAMES[$i]}" "$(_kb_to_human "${SCAN_SIZES[$i]}")"
+        done
+
+        echo ""
+        return
+    fi
+
+    # Quick check mode (for .zshrc)
+    if [[ "${1:-}" == "--quick" ]]; then
+        local disk_pct
+        disk_pct=$(df -h / | tail -1 | awk '{print $5}' | tr -d '%')
+        local disk_free
+        disk_free=$(df -h / | tail -1 | awk '{print $4}')
+        if (( disk_pct > 90 )); then
+            echo -e "${RED}⚠ LOW STORAGE: ${disk_free} free (${disk_pct}% used) — run 'macoptimize storage' to clean up${NC}"
+        elif (( disk_pct > 80 )); then
+            echo -e "${YELLOW}💾 Storage: ${disk_free} free (${disk_pct}% used)${NC}"
+        fi
+        return
+    fi
+
+    # Interactive TUI mode (default)
+    echo -e "${AMBER}Scanning storage...${NC}"
+    _storage_scan
+    _scan_large_files
+    _tui_storage_main
+}
+
+# ─── Other Commands ───────────────────────────────────────────────────────────
+
 cmd_kill_devservers() {
     print_header "Kill Orphaned Dev Servers"
 
@@ -621,6 +1484,7 @@ cmd_help() {
     echo -e "    ${GREEN}status${NC}           System health report & overview"
     echo -e "    ${GREEN}hogs${NC}             Detect resource hogs & abnormal processes"
     echo -e "    ${GREEN}monitor${NC}          Live system monitor (refreshes every 3s)"
+    echo -e "    ${GREEN}storage${NC}          Interactive storage manager (TUI)"
     echo -e "    ${GREEN}clean${NC}            Interactive cleanup (Xcode, Gradle, caches)"
     echo -e "    ${GREEN}optimize${NC}         Apply performance optimizations"
     echo -e "    ${GREEN}quick${NC}            Quick safe optimizations (DNS, cache, etc)"
@@ -632,6 +1496,9 @@ cmd_help() {
     echo -e "  ${BOLD}Examples:${NC}"
     echo "    macoptimize status          # Quick health check"
     echo "    macoptimize all             # Full system report"
+    echo "    macoptimize storage          # Interactive storage manager"
+    echo "    macoptimize storage --report  # Non-interactive report"
+    echo "    macoptimize storage --quick   # Quick check (for .zshrc)"
     echo "    macoptimize clean           # Free up disk space"
     echo "    macoptimize quick           # Fast safe optimizations"
     echo "    macoptimize monitor         # Live monitoring"
@@ -650,6 +1517,7 @@ case "${1:-help}" in
     status)          cmd_status ;;
     hogs)            cmd_hogs ;;
     monitor)         cmd_monitor ;;
+    storage)         cmd_storage "${2:-}" ;;
     clean)           cmd_clean ;;
     optimize)        cmd_optimize ;;
     quick)           cmd_quick ;;
