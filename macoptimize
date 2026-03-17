@@ -832,6 +832,7 @@ _tui_storage_main() {
     done
 
     local running=1
+    local key=""
     tput civis  # hide cursor
 
     # Cleanup on exit
@@ -926,11 +927,11 @@ _tui_storage_main() {
         echo -e "  ${AMBER}r${NC}  review item  ${AMBER}o${NC} open in Finder  ${AMBER}l${NC} large files  ${AMBER}q${NC} quit"
 
         # Read key
-        local key=""
-        read -rsn1 key
+        key=""
+        IFS= read -rsn1 key
         case "$key" in
             $'\x1b')
-                read -rsn2 key
+                read -rsn2 -t 0.1 key
                 case "$key" in
                     '[A')  # Up
                         if (( selected > 0 )); then
@@ -1180,10 +1181,10 @@ _tui_review_downloads() {
         echo ""
         echo -e "  ${AMBER}↑↓${NC} move  ${AMBER}space${NC} select  ${AMBER}d${NC} delete selected  ${AMBER}o${NC} open  ${AMBER}q${NC} back"
 
-        read -rsn1 key
+        IFS= read -rsn1 key
         case "$key" in
             $'\x1b')
-                read -rsn2 key
+                read -rsn2 -t 0.1 key
                 case "$key" in
                     '[A') (( sel > 0 )) && sel=$((sel - 1)) ;;
                     '[B') (( sel < ${#dl_files[@]} - 1 )) && sel=$((sel + 1)) ;;
@@ -1261,10 +1262,10 @@ _tui_large_files() {
         echo ""
         echo -e "  ${AMBER}↑↓${NC} move  ${AMBER}space${NC} select  ${AMBER}d${NC} delete selected  ${AMBER}o${NC} open in Finder  ${AMBER}q${NC} back"
 
-        read -rsn1 key
+        IFS= read -rsn1 key
         case "$key" in
             $'\x1b')
-                read -rsn2 key
+                read -rsn2 -t 0.1 key
                 case "$key" in
                     '[A') (( sel > 0 )) && sel=$((sel - 1)) ;;
                     '[B') (( sel < ${#LARGE_NAMES[@]} - 1 )) && sel=$((sel + 1)) ;;
