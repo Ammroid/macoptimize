@@ -6,7 +6,7 @@
 
 set -uo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -352,6 +352,256 @@ cmd_clean() {
     if (( total_freed > 0 )); then
         echo ""
         ok "Total space freed: ~$(bytes_to_human $((total_freed * 1024)))"
+    fi
+    echo ""
+}
+
+# ─── Cache Registry & Scanner ─────────────────────────────────────────────────
+#
+# Each entry: name|path|method|category
+#   method = rm-contents  → rm -rf "$path"/*  (keep dir, delete inside)
+#            rm-dir       → rm -rf "$path"    (delete dir entirely)
+#            cmd:<shell>  → run shell command (e.g. `npm cache clean --force`)
+#            logs-old     → find -mtime +7 -delete (logs only)
+#            skip         → show size, do not clean (toolchains etc.)
+#
+_cache_registry() {
+    cat <<'EOF'
+npm cache|$HOME/.npm/_cacache|rm-contents|node
+Yarn cache (~/.cache)|$HOME/.cache/yarn|rm-contents|node
+Yarn cache (Library)|$HOME/Library/Caches/Yarn|rm-contents|node
+pnpm store|$HOME/Library/pnpm/store|cmd:pnpm store prune|node
+pnpm store (alt)|$HOME/.local/share/pnpm/store|rm-contents|node
+Bun install cache|$HOME/.bun/install/cache|rm-contents|node
+node-gyp cache|$HOME/.node-gyp|rm-contents|node
+nvm versions (unused only via nvm)|$HOME/.nvm/.cache|rm-contents|node
+Electron cache|$HOME/Library/Caches/electron|rm-contents|node
+Electron-builder cache|$HOME/Library/Caches/electron-builder|rm-contents|node
+Playwright browsers|$HOME/Library/Caches/ms-playwright|rm-contents|node
+Cypress binaries|$HOME/Library/Caches/Cypress|rm-contents|node
+Puppeteer browsers|$HOME/.cache/puppeteer|rm-contents|node
+pip cache (macOS)|$HOME/Library/Caches/pip|rm-contents|python
+pip cache (XDG)|$HOME/.cache/pip|rm-contents|python
+Poetry cache|$HOME/Library/Caches/pypoetry|rm-contents|python
+uv cache|$HOME/.cache/uv|rm-contents|python
+Pipenv cache|$HOME/.cache/pipenv|rm-contents|python
+Conda pkgs|$HOME/miniconda3/pkgs|cmd:conda clean -a -y|python
+HuggingFace cache|$HOME/.cache/huggingface|rm-contents|python
+PyTorch hub cache|$HOME/.cache/torch|rm-contents|python
+Cargo registry|$HOME/.cargo/registry|rm-contents|rust
+Cargo git deps|$HOME/.cargo/git|rm-contents|rust
+Rustup toolchains|$HOME/.rustup/toolchains|skip|rust
+Go module cache|$HOME/go/pkg/mod|cmd:go clean -modcache|go
+Go build cache|$HOME/Library/Caches/go-build|rm-contents|go
+RubyGems cache|$HOME/.gem|rm-contents|ruby
+Bundler cache|$HOME/.bundle/cache|rm-contents|ruby
+Deno cache|$HOME/Library/Caches/deno|rm-contents|deno
+Xcode DerivedData|$HOME/Library/Developer/Xcode/DerivedData|rm-contents|mobile
+Xcode Archives|$HOME/Library/Developer/Xcode/Archives|rm-contents|mobile
+iOS DeviceSupport|$HOME/Library/Developer/Xcode/iOS DeviceSupport|rm-contents|mobile
+watchOS DeviceSupport|$HOME/Library/Developer/Xcode/watchOS DeviceSupport|rm-contents|mobile
+CoreSimulator caches|$HOME/Library/Developer/CoreSimulator/Caches|rm-contents|mobile
+Gradle caches|$HOME/.gradle/caches|rm-contents|mobile
+Gradle daemon|$HOME/.gradle/daemon|rm-contents|mobile
+Android build-cache|$HOME/.android/build-cache|rm-contents|mobile
+CocoaPods cache|$HOME/Library/Caches/CocoaPods|rm-contents|mobile
+Carthage cache|$HOME/Library/Caches/org.carthage.CarthageKit|rm-contents|mobile
+VS Code cache|$HOME/Library/Caches/com.microsoft.VSCode|rm-contents|ide
+VS Code CachedData|$HOME/Library/Application Support/Code/CachedData|rm-contents|ide
+Cursor cache|$HOME/Library/Application Support/Cursor/CachedData|rm-contents|ide
+JetBrains caches|$HOME/Library/Caches/JetBrains|rm-contents|ide
+Sublime Text cache|$HOME/Library/Caches/com.sublimetext.4|rm-contents|ide
+Homebrew downloads|$HOME/Library/Caches/Homebrew|cmd:brew cleanup -s --prune=0|system
+QuickLook thumbnails|$HOME/Library/Caches/com.apple.QuickLook.thumbnailcache|rm-dir|system
+User Logs (>7d)|$HOME/Library/Logs|logs-old|system
+Mail Downloads|$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads|rm-contents|system
+Safari cache|$HOME/Library/Caches/com.apple.Safari|rm-contents|browser
+Chrome cache|$HOME/Library/Caches/Google/Chrome|rm-contents|browser
+Firefox cache|$HOME/Library/Caches/Firefox|rm-contents|browser
+Arc cache|$HOME/Library/Caches/company.thebrowser.Browser|rm-contents|browser
+EOF
+}
+
+# Project-level scan globs (relative path patterns to find).
+# Each entry: pattern|safety-note
+_cache_project_patterns() {
+    cat <<'EOF'
+node_modules|Will reinstall on next `npm/yarn/pnpm install`
+.next|Next.js build cache; rebuilt on next dev/build
+.nuxt|Nuxt build cache; rebuilt on next dev/build
+.turbo|Turborepo cache; rebuilt on next task
+.vite|Vite cache; rebuilt on next dev
+.parcel-cache|Parcel cache; rebuilt on next build
+.svelte-kit|SvelteKit cache; rebuilt on next dev
+.angular|Angular cache; rebuilt on next build
+.cache|Generic build cache (Gatsby, etc.); rebuilt on next build
+__pycache__|Python bytecode; regenerated on next run
+.pytest_cache|pytest cache; rebuilt on next test
+.mypy_cache|mypy cache; rebuilt on next typecheck
+.ruff_cache|Ruff cache; rebuilt on next lint
+.tox|Tox envs; rebuilt on next tox run
+target|Rust build artifacts (heavy); rebuilt on next cargo build
+.dart_tool|Flutter/Dart cache; rebuilt on next pub get
+.build|SwiftPM build artifacts; rebuilt on next swift build
+DerivedData|Xcode per-project DerivedData
+EOF
+}
+
+_human_kb() {
+    local kb=$1
+    if (( kb >= 1048576 )); then
+        echo "$(echo "scale=2; $kb/1048576" | bc)G"
+    elif (( kb >= 1024 )); then
+        echo "$(echo "scale=1; $kb/1024" | bc)M"
+    else
+        echo "${kb}K"
+    fi
+}
+
+_run_cache_clean() {
+    local path="$1" method="$2"
+    case "$method" in
+        rm-contents)
+            [[ -d "$path" ]] && rm -rf "$path"/* "$path"/.[!.]* 2>/dev/null
+            ;;
+        rm-dir)
+            [[ -d "$path" ]] && rm -rf "$path"
+            ;;
+        logs-old)
+            find "$path" -type f -mtime +7 -delete 2>/dev/null
+            ;;
+        cmd:*)
+            eval "${method#cmd:}" 2>&1 | tail -3
+            ;;
+        skip)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+cmd_cache() {
+    local scan_projects=0 node_only=0 auto_clean=0 report_only=0 category=""
+    local project_root="$HOME"
+    for arg in "$@"; do
+        case "$arg" in
+            --projects|-p)  scan_projects=1 ;;
+            --node)         node_only=1; category="node" ;;
+            --python)       category="python" ;;
+            --mobile)       category="mobile" ;;
+            --system)       category="system" ;;
+            --browser)      category="browser" ;;
+            --clean|-c)     auto_clean=1 ;;
+            --report|-r)    report_only=1 ;;
+            --root=*)       project_root="${arg#--root=}" ;;
+        esac
+    done
+
+    print_header "Cache Scanner"
+    [[ -n "$category" ]] && info "Filter: category=$category"
+    [[ $auto_clean -eq 1 ]] && warn "Auto-clean ON (no prompts)"
+    [[ $report_only -eq 1 ]] && info "Report-only mode (no cleaning)"
+
+    local total_size_kb=0
+    local total_freed_kb=0
+    local -a found=()
+
+    # ── Phase 1: global caches from registry ──
+    print_section "Global Caches"
+    while IFS='|' read -r name path_tmpl method cat; do
+        [[ -z "$name" ]] && continue
+        [[ -n "$category" && "$cat" != "$category" ]] && continue
+        local path
+        path=$(eval echo "$path_tmpl")
+
+        # cmd: methods may not have a measurable dir; still try.
+        if [[ ! -d "$path" ]]; then continue; fi
+        local size_kb
+        size_kb=$(du -sk "$path" 2>/dev/null | awk '{print $1}')
+        [[ -z "$size_kb" || "$size_kb" -lt 100 ]] && continue   # <100K skip noise
+
+        total_size_kb=$((total_size_kb + size_kb))
+        found+=("$name|$path|$method|$size_kb|$cat")
+
+        local size_h
+        size_h=$(_human_kb "$size_kb")
+        printf "  %-30s %8s  ${CYAN}%s${NC}\n" "[$cat] $name" "$size_h" "$path"
+    done < <(_cache_registry)
+
+    if (( ${#found[@]} == 0 )); then
+        ok "No significant global caches found"
+    else
+        echo ""
+        info "Found ${#found[@]} caches totalling $(_human_kb $total_size_kb)"
+    fi
+
+    # ── Phase 2: project-level scan (opt-in) ──
+    local -a project_found=()
+    if (( scan_projects )); then
+        print_section "Project Caches (scanning $project_root, max depth 6)"
+        info "This may take a minute…"
+
+        while IFS='|' read -r pattern note; do
+            [[ -z "$pattern" ]] && continue
+            while IFS= read -r dir; do
+                [[ -z "$dir" ]] && continue
+                local size_kb
+                size_kb=$(du -sk "$dir" 2>/dev/null | awk '{print $1}')
+                [[ -z "$size_kb" || "$size_kb" -lt 1024 ]] && continue  # <1M skip
+                project_found+=("$pattern|$dir|rm-dir|$size_kb|project")
+                total_size_kb=$((total_size_kb + size_kb))
+                printf "  %-20s %8s  ${CYAN}%s${NC}\n" "$pattern" "$(_human_kb $size_kb)" "$dir"
+            done < <(find "$project_root" -maxdepth 6 -type d -name "$pattern" -prune 2>/dev/null)
+        done < <(_cache_project_patterns)
+
+        if (( ${#project_found[@]} == 0 )); then
+            ok "No project caches >1M found"
+        else
+            echo ""
+            info "Found ${#project_found[@]} project caches"
+        fi
+    fi
+
+    # ── Phase 3: clean (if requested) ──
+    if (( report_only )) || { (( ${#found[@]} == 0 )) && (( ${#project_found[@]} == 0 )); }; then
+        echo ""
+        info "Total: $(_human_kb $total_size_kb)"
+        [[ $scan_projects -eq 0 ]] && info "Tip: re-run with ${BOLD}--projects${NC} to scan local repos"
+        echo ""
+        return 0
+    fi
+
+    print_section "Clean"
+    local prompt_each=1
+    if (( auto_clean )); then
+        prompt_each=0
+    else
+        read -rp "  Clean all $(_human_kb $total_size_kb)? [y/N/i=interactive] " ans
+        case "$ans" in
+            y|Y) prompt_each=0 ;;
+            i|I) prompt_each=1 ;;
+            *)   info "Skipped"; echo ""; return 0 ;;
+        esac
+    fi
+
+    local item
+    for item in ${found[@]+"${found[@]}"} ${project_found[@]+"${project_found[@]}"}; do
+        IFS='|' read -r name path method size_kb cat <<<"$item"
+        if (( prompt_each )); then
+            read -rp "  Clean ${BOLD}$name${NC} ($(_human_kb $size_kb)) at $path? [y/N] " a
+            [[ ! "$a" =~ ^[Yy] ]] && continue
+        fi
+        if _run_cache_clean "$path" "$method"; then
+            ok "Cleaned $name ($(_human_kb $size_kb))"
+            total_freed_kb=$((total_freed_kb + size_kb))
+        else
+            info "Skipped $name (toolchain)"
+        fi
+    done
+
+    echo ""
+    if (( total_freed_kb > 0 )); then
+        ok "Freed ~$(_human_kb $total_freed_kb)"
     fi
     echo ""
 }
@@ -1488,6 +1738,7 @@ cmd_help() {
     echo -e "    ${GREEN}monitor${NC}          Live system monitor (refreshes every 3s)"
     echo -e "    ${GREEN}storage${NC}          Interactive storage manager (TUI)"
     echo -e "    ${GREEN}clean${NC}            Interactive cleanup (Xcode, Gradle, caches)"
+    echo -e "    ${GREEN}cache${NC}            Scan ALL caches (node/python/rust/go/mobile/ide/...)"
     echo -e "    ${GREEN}optimize${NC}         Apply performance optimizations"
     echo -e "    ${GREEN}quick${NC}            Quick safe optimizations (DNS, cache, etc)"
     echo -e "    ${GREEN}dev${NC}              Developer environment health check"
@@ -1502,6 +1753,10 @@ cmd_help() {
     echo "    macoptimize storage --report  # Non-interactive report"
     echo "    macoptimize storage --quick   # Quick check (for .zshrc)"
     echo "    macoptimize clean           # Free up disk space"
+    echo "    macoptimize cache             # Scan & clean every known cache"
+    echo "    macoptimize cache --node      # Only node ecosystem caches"
+    echo "    macoptimize cache --projects  # Also scan local repos (node_modules, .next…)"
+    echo "    macoptimize cache --report    # Report-only, no cleaning"
     echo "    macoptimize quick           # Fast safe optimizations"
     echo "    macoptimize monitor         # Live monitoring"
     echo ""
@@ -1521,6 +1776,7 @@ case "${1:-help}" in
     monitor)         cmd_monitor ;;
     storage)         cmd_storage "${2:-}" ;;
     clean)           cmd_clean ;;
+    cache)           shift; cmd_cache "$@" ;;
     optimize)        cmd_optimize ;;
     quick)           cmd_quick ;;
     dev)             cmd_dev ;;
