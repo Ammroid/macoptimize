@@ -8,16 +8,31 @@ Built for developers running **Android, iOS, AI agents, and CLI tools** on Apple
 
 ## Install
 
+### Homebrew (recommended)
+
+```bash
+brew install ammroid/tap/macoptimize
+```
+
+### One-line installer
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ammroid/macoptimize/main/install.sh | bash
 ```
 
-Or manually:
+### Manual
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ammroid/macoptimize/main/macoptimize -o ~/bin/macoptimize
 chmod +x ~/bin/macoptimize
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+### Upgrade
+
+```bash
+brew upgrade macoptimize         # via Homebrew
+# or just re-run install.sh        # one-liner
 ```
 
 **Requirements:** macOS 12+ · Apple Silicon or Intel · bash (pre-installed) · no dependencies
@@ -30,13 +45,31 @@ echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 macoptimize status          # System health report (CPU, RAM, swap, disk, thermal)
 macoptimize hogs            # Detect resource hogs & abnormal processes
 macoptimize monitor         # Live dashboard — refreshes every 3s
+macoptimize storage         # Interactive storage manager (TUI)
 macoptimize clean           # Interactive cleanup (Xcode, Gradle, npm, Docker caches)
+macoptimize cache           # Universal cache scanner — node/python/rust/go/mobile/ide/...
 macoptimize optimize        # Performance tweaks (DNS, Spotlight, animations)
 macoptimize quick           # Fast safe 1-command cleanup
 macoptimize dev             # Developer environment health check
 macoptimize kill-devservers # Kill orphaned webpack/vite/metro/expo servers
 macoptimize all             # Full report: status + hogs + dev
 ```
+
+### `cache` — universal cache scanner
+
+Inventories 50+ caches across categories with size + location, then asks before cleaning each:
+
+```bash
+macoptimize cache                    # Scan everything, interactive clean
+macoptimize cache --report           # Report-only, no cleaning
+macoptimize cache --node             # Only node ecosystem
+macoptimize cache --python           # Only Python
+macoptimize cache --mobile           # Only Xcode/Gradle/CocoaPods
+macoptimize cache --projects         # Also scan local repos for node_modules, .next, .turbo, __pycache__, target…
+macoptimize cache --clean            # Skip prompts (auto-clean)
+```
+
+Covers: **node** (npm, yarn, pnpm, bun, Playwright, Cypress, Puppeteer, Electron), **python** (pip, poetry, uv, pipenv, conda, HuggingFace, PyTorch), **rust/go/ruby/deno**, **mobile** (Xcode DerivedData, iOS DeviceSupport, Gradle, CocoaPods, Carthage), **IDE** (VS Code, Cursor, JetBrains), **system** (Homebrew, QuickLook, logs), **browsers** (Safari, Chrome, Firefox, Arc).
 
 ---
 
